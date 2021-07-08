@@ -33,18 +33,19 @@
 #  ENCLOSURE[USB]=\
 #  " 0  1"
 
-VERSION=2.5
+VERSION=2.6
 
 set -e
 set -u
 set -o pipefail
 
-declare -A BYSIZE LOC STATE MFG MODEL FW SN ID TYPE DRIVER FS HEALTH DEFECTS
+declare -A BYSIZE LOC STATE MFG MODEL FW SN ID TYPE DRIVER META HEALTH DEFECTS
 declare -A BAY DISKSIZE ENCLOSURE PCI SLOTS IDS ALIAS INARRAY LSIARRAY
 
 DEBUG=
 DEFERR=
 DEFHTH=
+DEMO=
 OBSCURE=
 PROGRESS=
 QUIET=
@@ -73,6 +74,7 @@ usage() {
 ################################################################################
 while [[ $# -gt 0 ]] ; do
 	case "$1" in
+		--demo) DEMO=y ;;
 		-E|--errors) SMOPT+=" -A"; DEFERR=- ;;
 		-H|--health) SMOPT+=" -H"; DEFHTH=- ;;
 		#-O|--obscure) OBSCURE=y ;;
@@ -93,6 +95,11 @@ if [[ $# > 0 ]] ; then
 	ARG=$1
 	shift
 fi
+
+################################################################################
+in_path() {
+	command -v "$@" >/dev/null 2>&1
+}
 
 ################################################################################
 info() {
@@ -141,6 +148,7 @@ USB=0
 # Get SMARY drive data
 get_smart() {
 	local DISK=$1 SIZE=$2 MEGARAID=${3:-}
+	debug "get_smart: DISK:$DISK SIZE:$SIZE MEGARAID:$MEGARAID"
 
 	BYSIZE[$SIZE]+="$DISK "
 	DISKSIZE[$DISK]="$SIZE"
@@ -161,7 +169,7 @@ get_smart() {
 		/^SMART overall-health self-assessment test result:/ {HEALTH=$6};
 		/^Elements in grown defect list:/ {DEFECT=$6};
 		END {print MODEL" "SN" "substr(SN,0,8)" "TYPE" "DRIVER" "HEALTH" "DEFECT}')"
-	debug "get_blk_devs: $DISK M:$M S1:$S1 S2:$S2 T:$T DRV:$DRV H:$H D:$D"
+	debug "get_smart: $DISK M:$M S1:$S1 S2:$S2 T:$T DRV:$DRV H:$H D:$D"
 	[[ -z $PROGRESS ]] || echo "Disk: $DISK"
 	MODEL[$DISK]="$M"
 	if [[ -n $S1 ]] ; then
@@ -180,14 +188,14 @@ get_smart() {
 	if [[ $I =~ -eui\. ]] ; then
 		ALIAS[$I]="$J"
 		ID[$DISK]="$J"
-		debug "get_blk_devs: $DISK $J ($I)"
+		debug "get_smart: $DISK $J ($I)"
 	else
 		ID[$DISK]="$I"
-		debug "get_blk_devs: $DISK $I"
+		debug "get_smart: $DISK $I"
 	fi
 
 	local CES
-	#debug "get_blk_devs: $DISK $S1 ${SN[$DISK]:-} ${SN[$S1]:-} $I"
+	#debug "get_smart: $DISK $S1 ${SN[$DISK]:-} ${SN[$S1]:-} $I"
 	if [[ -n $T && ! $T =~ NVME ]] ; then
 		TYPE[$DISK]="$T"
 		if [[ $T =~ ^SATA ]] ; then
@@ -203,16 +211,16 @@ get_smart() {
 				CES="SATA:$SATA"
 				SATA=$((SATA + 1))
 			fi
-			debug "  get_blk_devs: SATA $T $DISK $S1 $CES"
-			#info "get_blk_devs: SATA LOC[$DISK]=$CES"
+			debug "  get_smart: SATA $T $DISK $S1 $CES"
+			#info "get_smart: SATA LOC[$DISK]=$CES"
 			LOC[$DISK]="$CES"
 			BAY[$CES]="$DISK"
 		fi
-	elif command -v nvme >/dev/null 2>&1 ; then
+	elif in_path nvme ; then
 		if nvme list | grep -q "/$DISK" ; then
 			CES="$(sed -E 's/n[0-9]+$//; s/^nvme/NVME:/' <<<"$DISK")"
-			debug "  get_blk_devs: NVME $DISK $S1 $CES"
-			#info "get_blk_devs: NVME LOC[$DISK]=$CES"
+			debug "  get_smart: NVME $DISK $S1 $CES"
+			#info "get_smart: NVME LOC[$DISK]=$CES"
 			LOC[$DISK]="$CES"
 			BAY[$CES]="$DISK"
 			if [[ $M =~ ^INTELSSDPEK ]] ; then
@@ -238,8 +246,11 @@ get_blk_devs() {
 			DISK="$(sed -e 's/^.*-//; s/p[0-9]*$//' <<<"$DISK")"
 			if [[ -n $SWAP ]] ; then
 				debug "get_blk_devs: $DISK $SIZE $SWAP"
-				FS[$DISK]="swap"
+				META[$DISK]="swap"
 				INARRAY[$DISK]="swap"
+				if swapon -s | grep -q "/dev/$DISK" ; then
+					STATE[$DISK]="Active"
+				fi
 			fi
 			continue
 		fi
@@ -252,14 +263,15 @@ get_blk_devs() {
 ################################################################################
 # Enumerate Drive bays
 get_sas_devs() {
-	command -v sas2ircu >/dev/null 2>&1 || return 0
+	in_path sas2ircu || return 0
 
 	local CTRL E S T M K F N1 N2 ST DISK CES
 	for CTRL in $(sas2ircu list | awk 'NR>8 && /^ *[0-9]+/ {print $1}') ; do
 		while read -r E S T M K F N1 N2 ST ; do
-			DISK="${SN[$N1]:-${SN[$N2]}}"
+			#DISK="${SN[$N1]:-${SN[$N2]}}"
+			DISK="${SN[$N2]}"
 			CES="$CTRL:$E:$S"
-			debug "get_sas_devs: DISK:$DISK CTRL:$CTRL ENC:$E SLOT:$S TYPE:$T MFG:$M MODEL:$K FW:$N2 SN:$N1 CES:$CES"
+			debug "get_sas_devs: DISK:$DISK CTRL:$CTRL ENC:$E SLOT:$S TYPE:$T MFG:$M MODEL:$K FW:$N1 SN:$N2 CES:$CES"
 			#info "get_sas_devs: LOC[$DISK]=$CES"
 			LOC[$DISK]="$CES"
 			BAY[$CES]="$DISK"
@@ -286,7 +298,7 @@ get_sas_devs() {
 ################################################################################
 # Enumerate MegaRAID arrays
 get_megacli_arrays() {
-	command -v megaclisas-status >/dev/null 2>&1 || return 0
+	in_path megaclisas-status || return 0
 
 	local LINE P S1 S2 S3 A S D SER
 	while read -r LINE ; do
@@ -316,7 +328,7 @@ get_megacli_arrays() {
 ################################################################################
 # Enumerate LSI/MegaRAID Drive bays
 get_lsi_devs() {
-	command -v storcli64 >/dev/null 2>&1 || return 0
+	in_path storcli64 || return 0
 
 	get_megacli_arrays
 
@@ -354,9 +366,9 @@ get_lsi_devs() {
 ARRAYS=
 
 ################################################################################
-# Enumerate zpool array drives
+# Enumerate LVM drives
 get_lvm_devs(){
-	command -v vgs >/dev/null 2>&1 || return 0
+	in_path vgs || return 0
 
 	local ARRAY
 	for ARRAY in $(vgs -o vg_name | tail -n +2) ; do
@@ -369,8 +381,9 @@ get_lvm_devs(){
 		if [[ $DISK =~ /dev/ ]] ; then
 			DISK="$(sed -E 's|^/dev/||; s|[0-9]+$||' <<<"$DISK")"
 			debug "get_lvm_devs: $DISK in $ARRAY"
-			FS[$DISK]="lvm"
+			META[$DISK]="lvm"
 			INARRAY[$DISK]="$(lvs -o vg_name,lv_name | awk 'NR>1 {print $1"/"$2}' | grep -m1 "$ARRAY/")"
+			STATE[$DISK]="Online"
 		fi
 	done <<<"$(pvs -o pv_name,vg_name | tail -n +2)"
 }
@@ -378,7 +391,7 @@ get_lvm_devs(){
 ################################################################################
 # Enumerate mdadm array drives
 get_mdadm_devs() {
-	if ! command -v mdadm >/dev/null 2>&1 ; then
+	if ! in_path mdadm ; then
 		return 0
 	elif [[ ! -d /dev/md ]] ; then
 		debug "No mdadm arrays found"
@@ -393,7 +406,7 @@ get_mdadm_devs() {
 			if [[ $DISK =~ /dev/ ]] ; then
 				DISK="$(sed -E 's|^/dev/||; s|[0-9]+$||' <<<"$DISK")"
 				debug "get_mdadm_devs: $DISK in $ARRAY ($S1/$S2)"
-				FS[$DISK]="mdadm"
+				META[$DISK]="mdadm"
 				INARRAY[$DISK]="${ARRAY##*/}"
 				STATE[$DISK]="$S1/$S2"
 			fi
@@ -404,7 +417,7 @@ get_mdadm_devs() {
 ################################################################################
 # Enumerate zpool array drives
 get_zpool_devs() {
-	command -v zpool >/dev/null 2>&1 || return 0
+	in_path zpool || return 0
 
 	local ARRAY ST DISK
 	for ARRAY in $(zpool list | grep -v -e "no pools available" -e ^NAME | awk '{print $1}') ; do
@@ -426,19 +439,23 @@ get_zpool_devs() {
 				if [[ -n ${ALIAS[$DISK]:-} ]] ; then
 					DISK="${ALIAS[$DISK]}"
 				fi
-				debug "get_zpool_devs: $DISK -> $ARRAY => $LINE"
-				FS[$DISK]="zfs"
+				META[$DISK]="zfs"
 				INARRAY[$DISK]="$ARRAY${ST:+-$ST}"
+				STATE[$DISK]="$(awk '{print $2}' <<<"$LINE")"
+				debug "get_zpool_devs: $DISK -> $ARRAY (${STATE[$DISK]}) => $LINE"
 			elif [[ $LINE =~ scsi- ]] ; then
-				debug "get_zpool_dev: sDISK -> $ARRAY"
-				FS[$DISK]="zfs"
+				META[$DISK]="zfs"
 				INARRAY[$DISK]="$ARRAY${ST:+-$ST}"
+				STATE[$DISK]="$(awk '{print $2}' <<<"$LINE")"
+				debug "get_zpool_devs: $DISK -> $ARRAY (${STATE[$DISK]})"
 			elif [[ $LINE =~ [a-zA-Z0-9]+.*AVAIL ]] ; then
-				FS[$DISK]="zfs"
+				META[$DISK]="zfs"
 				INARRAY[$DISK]="$ARRAY${ST:+-$ST}"
+				STATE[$DISK]="AVAIL"
 			elif [[ $LINE =~ [a-zA-Z0-9]+.*ONLINE ]] ; then
-				FS[$DISK]="zfs"
+				META[$DISK]="zfs"
 				INARRAY[$DISK]="$ARRAY${ST:+-$ST}"
+				STATE[$DISK]="ONLINE"
 			fi
 		done <<<"$(zpool status "$ARRAY")"
 	done
@@ -457,20 +474,22 @@ disk2type() {
 		echo "DVD"
 	elif [[ ${MODEL[$DISK]:-} == VIRTUAL-DISK && ${ID[$DISK]:-} =~ scsi ]] ; then
 		echo "iSCSI"
-	elif grep -q ceph <<<"$(lsblk -i | grep "$DISK[0-9]")" ; then
-		echo "CEPH"
+	#elif grep -q ceph <<<"$(lsblk -i | grep "$DISK[0-9]")" ; then
+	#	echo "CEPH"
 	else
 		echo "${TYPE[$DISK]:-Empty}"
 	fi
 }
 
 ################################################################################
-disk2fs() {
+disk2meta() {
 	local F=$UNUSED DISK=$1 I=${ID[$DISK]}
-	if [[ -n ${FS[${I:-0}]:-} ]] ; then
-		F="${FS[$I]}"
-	elif [[ -n ${FS[${DISK:-0}]:-} ]] ; then
-		F="${FS[$DISK]}"
+	if [[ -n ${META[${I:-0}]:-} ]] ; then
+		F="${META[$I]}"
+	elif [[ -n ${META[${DISK:-0}]:-} ]] ; then
+		F="${META[$DISK]}"
+	elif grep -q ceph <<<"$(lsblk -i | grep "$DISK[0-9]")" ; then
+		F=ceph
 	else
 		F=$UNUSED
 	fi
@@ -479,24 +498,25 @@ disk2fs() {
 
 ################################################################################
 disk2array() {
-	local ARRAY=$UNUSED DISK=$1 I=${ID[$DISK]}
+	local ARRAY=noarray DISK=$1 I=${ID[$DISK]} OSD
 	for ARRAY in $ARRAYS ; do
 		if [[ -n ${INARRAY[${I:-0}]:-} ]] ; then
 			ARRAY="${INARRAY[$I]}"
 		elif [[ -n ${INARRAY[${DISK:-0}]:-} ]] ; then
 			ARRAY="${INARRAY[$DISK]}"
 		else
-			ARRAY=$UNUSED
+			ARRAY=noarray
 		fi
 	done
-	if [[ $ARRAY == $UNUSED ]] ; then
+	if [[ $ARRAY == noarray ]] ; then
 		# shellcheck disable=SC1087
 		if [[ $DISK =~ ^sr ]] ; then
 			ARRAY=dvd
 		elif [[ ${MODEL[$DISK]} == VIRTUAL-DISK && $I =~ scsi ]] ; then
 			ARRAY=iscsi
-		elif grep -q ceph <<<"$(lsblk -i | grep "$DISK[0-9]")" ; then
-			ARRAY=ceph
+		elif OSD="$(lsblk -i | awk "/$DISK[0-9].*ceph/ {print \$7}")" ; then
+			OSD="${OSD##*/}"
+			ARRAY="${OSD/ceph-/osd.}"
 		else
 			local ROOT
 			ROOT=$(lsblk -i | awk '/^sd/ {DISK=$1}; / \/$/ {print DISK}')
@@ -510,8 +530,18 @@ disk2array() {
 
 ################################################################################
 getstate() {
-	if [[ -n $DISK && -n ${STATE[$DISK]:-} && ${STATE[$DISK]:-} != Ready ]] ; then
-		echo "${STATE[$DISK]}"
+	local IDX
+	if [[ -n $DISK ]] ; then
+		if [[ -n ${ID[$DISK]} ]] ; then
+			IDX="${ID[$DISK]}"
+			if [[ -n ${STATE[$IDX]:-} && ${STATE[$IDX]:-} != Ready ]] ; then
+				echo "${STATE[$IDX]}"
+				return 0
+			fi
+		fi
+		if [[ -n ${STATE[$DISK]:-} && ${STATE[$DISK]:-} != Ready ]] ; then
+			echo "${STATE[$DISK]}"
+		fi
 	fi
 }
 
@@ -524,14 +554,26 @@ uniq-list() {
 }
 
 ################################################################################
+# Obfusate serial numbers for demo mode
+obfuscate() {
+	if [[ -n $DEMO ]] ; then
+		sed -E 's/[A-Z0-9]{7,}/XXXXXXXX/g; s/-[A-Z0-9a-z]{16,}/-XXXXXXXXXXXX/g'
+	else
+		cat 
+	fi
+}
+
+################################################################################
 listdrives() {
 	info "listdrives"
-	#for SIZE in $(uniq-list "${!BYSIZE[@]}") ; do
+	([[ -n $QUIET ]] || echo "Disk: Size: Type: ${DEFHTH:+Health:} ${DEFERR:+Defects:} Kind: Array: Loc: Model: Serial: By-id: State:"
+	local LEN
 	for SIZE in "${!BYSIZE[@]}" ; do
 		for DISK in ${BYSIZE[$SIZE]} ; do
-			echo "$DISK $SIZE $(disk2type "$DISK") ${DEFHTH:+${HEALTH[$DISK]:-$DEFHTH}} ${DEFERR:+${DEFECTS[$DISK]:-$DEFERR}} $(disk2fs "$DISK") $(disk2array "$DISK") ${LOC[$DISK]:-$UNUSED} ${MODEL[$DISK]:-UnknownModel} ${SN[$DISK]:-UnknownSN} ${ID[$DISK]:-UnknownID} $(getstate "$DISK")"
+			LEN="0${#DISK}"
+			echo "${LEN:0:2} $DISK $SIZE $(disk2type "$DISK") ${DEFHTH:+${HEALTH[$DISK]:-$DEFHTH}} ${DEFERR:+${DEFECTS[$DISK]:-$DEFERR}} $(disk2meta "$DISK") $(disk2array "$DISK") ${LOC[$DISK]:-$UNUSED} ${MODEL[$DISK]:-UnknownModel} ${SN[$DISK]:-UnknownSN} ${ID[$DISK]:-UnknownID} $(getstate "$DISK")"
 		done
-	done | sort | column -t
+	done | sort | sed -E 's/^[0-9]{2}//' ) | obfuscate | column -t
 }
 
 ################################################################################
@@ -548,12 +590,16 @@ show_bays() {
 		while read -r ROW ; do
 			#echo "$ENC -> $ROW"
 			for B in $ROW ; do
-				#echo "B:" $ENC:$B ${BAY[$ENC:$B]}"
-				DEV="${BAY[$ENC:$B]:-}"
-				if [[ -n $DEV ]] ; then
-					echo -n "$B:$DEV:$(disk2type "$DEV"):${DISKSIZE[$DEV]} "
+				if [[ $B =~ [A-Z] ]] ; then
+					echo -n "$B:NA "
 				else
-					echo -n "$B:Empty "
+					#echo "B:" $ENC:$B ${BAY[$ENC:$B]}"
+					DEV="${BAY[$ENC:$B]:-}"
+					if [[ -n $DEV ]] ; then
+						echo -n "$B:$DEV:$(disk2type "$DEV"):${DISKSIZE[$DEV]} "
+					else
+						echo -n "$B:Empty "
+					fi
 				fi
 			done
 			echo
@@ -571,13 +617,13 @@ locatedrive() {
 	fi
 
 	echo "Locate $DISK (${LOC[$DISK]}) $ST"
-	if command -v sas2ircu >/dev/null 2>&1 ; then
+	if in_path sas2ircu ; then
 		case "$ST" in
 			on|On|ON|start|Start|START|begin|Begin|BEGIN|true|True|TRUE) ST=ON ;;
 			off|Off|OFF|stop|Stop|STOP|end|End|END|false|False|FALSE) ST=OFF ;;
 		esac
 		$TEST sas2ircu "$CTRL" LOCATE "$ENC:$SLOT" "$ST" | grep ^SAS2IRCU
-	elif command -v storcli64 >/dev/null 2>&1 ; then
+	elif in_path storcli64 ; then
 		case "$ST" in
 			on|On|ON|start|Start|START|begin|Begin|BEGIN|true|True|TRUE) ST=start ;;
 			off|Off|OFF|stop|Stop|STOP|end|End|END|false|False|FALSE) ST=stop ;;
@@ -588,6 +634,12 @@ locatedrive() {
 		warn "I don't know how to locate $DISK"
 	fi
 }
+
+################################################################################
+if ! in_path gawk ; then
+	echo "E: gawk not installed"
+	exit 1
+fi
 
 ################################################################################
 get_blk_devs
