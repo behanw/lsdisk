@@ -15,20 +15,19 @@ for easy drive location if the enclosure allows it.
 
 Example /etc/lsdisk.conf
 
-> ENCLOSURE[0:0]=\
-> "2  5  8 11
->  1  4  7 10
->  0  3  6  9"
->
-> ENCLOSURE[M2]=\
-> " 0  1"
->
-> ENCLOSURE[NVME]=\
-> " 0  1"
->
-> ENCLOSURE[SATA]=\
-> " 0  1"
->
-> ENCLOSURE[USB]=\
-> " 0  1"
-
+     ENCLOSURE[0:0]=\
+     "2  5  8 11
+      1  4  7 10
+      0  3  6  9"
+    
+     ENCLOSURE[M2]=\
+     " 0  1"
+    
+     ENCLOSURE[NVME]=\
+     " 0  1"
+    
+     ENCLOSURE[SATA]=\
+     " 0  1"
+    
+     ENCLOSURE[USB]=\
+     " 0  1"
