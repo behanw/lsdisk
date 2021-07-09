@@ -34,7 +34,7 @@
 #  ENCLOSURE[USB]=\
 #  " 0  1"
 
-VERSION=2.7
+VERSION=2.8
 
 set -e
 set -u
@@ -179,7 +179,7 @@ get_meta() {
 		/^SMART overall-health self-assessment test result:/ {HEALTH=$6};
 		/^Elements in grown defect list:/ {DEFECT=$6};
 		END {print MODEL" "SN" "substr(SN,0,8)" "TYPE" "DRIVER" "HEALTH" "DEFECT}')"
-	debug "get_meta: $DISK M:$M S1:$S1 S2:$S2 T:$T DRV:$DRV H:$H D:$D"
+	debug "  get_meta: $DISK M:$M S1:$S1 S2:$S2 T:$T DRV:$DRV H:$H D:$D"
 	[[ -z $PROGRESS ]] || echo "Disk: $DISK"
 	MODEL[$DISK]="$M"
 	if [[ -n $S1 ]] ; then
@@ -187,21 +187,25 @@ get_meta() {
 		SN[$S1]="$DISK"
 		SN[$S2]="$DISK"
 	fi
-	debug "$DISK($DRV): $H"
+	debug "  get_meta: $DISK($DRV): $H"
 	HEALTH[$DISK]="$H"
 	DEFECTS[$DISK]="$D"
 	#DRIVER[$DISK]="$DRV"
 
 	local I J
 	# shellcheck disable=SC2012
-	read -r I J <<<"$(ls -l /dev/disk/by-id/[ans]* | awk "/$DISK\$/ {print \$9}" | sed 's|^.*/||' | paste - -)"
-	if [[ $I =~ -eui\. ]] ; then
+	read -r I J <<<"$(ls -l /dev/disk/by-id/[answ]* | awk "/$DISK\$/ {print \$9}" | sed 's|^.*/||' | paste - -)"
+	if [[ $I =~ -eui\. || $I =~ ^wwn- ]] ; then
 		ALIAS[$I]="$J"
 		ID[$DISK]="$J"
-		debug "get_meta: $DISK $J ($I)"
+		debug "  get_meta: $DISK $J -> $I"
+	elif [[ $J =~ -eui\. || $J =~ ^wwn- ]] ; then
+		ALIAS[$J]="$I"
+		ID[$DISK]="$I"
+		debug "  get_meta: $DISK $I -> $J"
 	else
 		ID[$DISK]="$I"
-		debug "get_meta: $DISK $I"
+		debug "  get_meta: $DISK $I ($J)"
 	fi
 
 	local CES
@@ -243,7 +247,7 @@ get_meta() {
 		TYPE[$DISK]="UnknownDev"
 	fi
 
-	#debug "$DISK:$M:$S1:${I##*/}:$S2"
+	#debug " get_meta: $DISK:$M:$S1:${I##*/}:$S2"
 	debug "$DISK ${MODEL[$DISK]:-No-model} ${SN[$DISK]:-No-disk} ${ID[$DISK]:-No-id}"
 }
 
@@ -447,7 +451,7 @@ get_zpool_devs() {
 				ST="l2arc"
 			elif [[ $LINE =~ spares$ ]] ; then
 				ST="spare"
-			elif [[ $LINE =~ nvme- ]] ; then
+			elif [[ $LINE =~ nvme- || $LINE =~ ^wwn- ]] ; then
 				if [[ -n ${ALIAS[$DISK]:-} ]] ; then
 					DISK="${ALIAS[$DISK]}"
 				fi
