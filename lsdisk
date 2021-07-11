@@ -34,28 +34,36 @@
 #  ENCLOSURE[USB]=\
 #  " 0  1"
 
-VERSION=3.0
+VERSION=3.1
 
 set -e
 set -u
 set -o pipefail
 
 declare -A BYSIZE LOC BOOT STATE MODEL FW SN ID TYPE META DRIVER HEALTH DEFECTS WEAR
-declare -A MFG BAY DID DISKSIZE ENCLOSURE ALIAS INARRAY LSIARRAY
+declare -A MFG BAY DID DISKSIZE ENCLOSURE ALIAS INARRAY LSIARRAY ARRAYCOLOR
 #declare -A PCI SLOTS IDS
 
+BADDRIVE=${BADDRIVE:-} # For testing
+CACHED=
+COLOR=y
 DEBUG=
 DEMO=
 PROGRESS=
 QUIET=
 TEST=
 UNUSED="none"
+CMD="${0##*/}"
+
+CACHEDIR="$HOME/.cache/$CMD"
+mkdir -p "$CACHEDIR"
 
 ################################################################################
 usage() {
 	cat <<-ENDHELP
 	Version: v$VERSION
-	Usage: $(basename "$0") [options] [commands]
+	Usage: $CMD [options] [commands]
+	  -c,--cache     Use cached output of tools
 	  -P,--progress  Show progress
 	  -h,--help      This help
 	  -q,--quiet     Less output
@@ -68,16 +76,28 @@ usage() {
 }
 
 ################################################################################
+# Read local configuration file
+CONF="/etc/lsdisk.conf"
+if [[ -f $CONF ]] ; then
+	# shellcheck disable=SC1090
+	. "$CONF"
+else
+	warn "No $CONF found."
+fi
+
+################################################################################
 # Parse optional parameters
 while [[ $# -gt 0 ]] ; do
 	case "$1" in
-		--demo) DEMO=y ;;
-		-P|--progress) PROGRESS=y ;;
+		-C|--cache) CACHED=y ;;
 		--debug) DEBUG=y ;;
+		--demo) DEMO=y ;;
+		-nc|--nocolor|--no-color) COLOR= ;;
+		-P|--progress) PROGRESS=y ;;
 		-q|--quiet) QUIET=y ;;
 		--test) TEST="echo" ;;
 		--trace) set -x ;;
-		-V|--version) echo "$(basename "$0") v$VERSION"; exit 0 ;;
+		-V|--version) echo "$CMD v$VERSION"; exit 0 ;;
 		-h|--help) usage ;;
 		*) break ;;
 	esac
@@ -88,6 +108,17 @@ ARG=
 if [[ $# -gt 0 ]] ; then
 	ARG=$1
 	shift
+fi
+
+################################################################################
+if [[ -n $COLOR ]] ; then
+	BLACK_FG='\e[30m'; RED_FG='\e[31m'; GREEN_FG='\e[32m'; YELLOW_FG='\e[33m'; BLUE_FG='\e[34m'; MAGENTA_FG='\e[35m'; CYAN_FG='\e[36m'
+	RED_BG='\e[41m'; GREEN_BG='\e[42m'; YELLOW_BG='\e[43m'; BLUE_BG='\e[44m'; MAGENTA_BG='\e[45m'; CYAN_BG='\e[46m'; WHITE_BG='\e[47m'
+	STANDOUT='\e[3m'; BLINK='\e[5m'; BACK='\e[0m'
+else
+	BLACK_FG=; RED_FG=; GREEN_FG=; YELLOW_FG=; BLUE_FG=; MAGENTA_FG=; CYAN_FG=
+	RED_BG=; GREEN_BG=; YELLOW_BG=; BLUE_BG=; MAGENTA_BG=; CYAN_BG=; WHITE_BG=
+	STANDOUT=; BLINK=; BACK=
 fi
 
 ################################################################################
@@ -104,19 +135,32 @@ info() {
 
 ################################################################################
 warn() {
-	echo -e "W:" "$@"
+	echo -e "${YELLOW_FG}W:" "$@" "$BACK"
 }
 
 ################################################################################
 error() {
-	echo -e "E:" "$@"
+	echo -e "${RED_FG}E:" "$@" "$BACK" >&2
 	exit 1
 }
 
 ################################################################################
 debug() {
 	if [[ -n $DEBUG ]] ; then
-		echo -e "D:" "$@" >&2
+		echo -e "${CYAN_FG}D:" "$@" "$BACK" >&2
+	fi
+}
+
+################################################################################
+progress() {
+	if [[ -n $PROGRESS ]] ; then
+		if [[ -n $DEBUG ]] ; then
+			echo -e "$BLUE_FG""$@""$BACK" >&2
+		elif [[ $# -eq 0 ]] ; then
+			echo >&2
+		else
+			echo -e -n "$BLUE_FG""$@"" $BACK" >&2
+		fi
 	fi
 }
 
@@ -199,7 +243,13 @@ set_model() {
 ################################################################################
 # Read SMART information
 readsmart() {
-	local DISK=$1 LID=${2:-} DRV
+	local DISK=$1 LID=${2:-} DRV CACHE
+	CACHE="$CACHEDIR/$DISK-smartctl.txt"
+
+	if [[ -n $CACHED && -f $CACHE ]] ; then
+		cat "$CACHE"
+		return 0
+	fi
 
 	for DRV in ${LID:+megaraid,$LID} "" usbjmicron sat scsi ata ; do
 		#debug "readsmart: $DISK trying $DRV"
@@ -209,13 +259,17 @@ readsmart() {
 		EXIT=$?
 		if [[ $EXIT -eq 0 || $EXIT -eq 4 ]] ; then
 			debug "Disk $DISK(${DRV:-default}): $EXIT\\n$OUTPUT\\n-------------------" >&2
-			echo "Driver: ${DRV:-default}"
-			echo "$OUTPUT"
+			if [[ $EXIT -eq 0 ]] ; then
+				echo -e "Driver: ${DRV:-default}\n$OUTPUT" | tee "$CACHE"
+			else
+				rm -f "$CACHE"
+				echo -e "Driver: ${DRV:-default}\n$OUTPUT"
+			fi
 			return "$EXIT"
 		fi
 	done
 
-	echo "No SMART information for $DISK" >&2
+	warn "No SMART information for $DISK"
 }
 
 ################################################################################
@@ -256,10 +310,9 @@ get_smart() {
 		/Media_Wearout_Indicator/ {WEAR $10};
 		END {print MFG" "MODEL" "SN" "substr(SN,0,8)" "FW" "TYPE" "DRIVER" "HEALTH" "DEFECT" "WEAR}')"
 	debug "  get_smart: $DISK MF:$MF M:$M S1:$S1 S2:$S2 FW:$F T:$T DRV:$DRV H:$H D:$D W:$W"
-	[[ -z $PROGRESS ]] || echo "Disk: $DISK"
+	progress "$DISK"
 	set_model "$DISK" "$MF" "$M"
 	if [[ $M == "VIRTUAL-DISK" && ${ID[$DISK]} =~ ^scsi ]] ; then
-		#INARRAY[$DISK]="iscsi"
 		META[$DISK]="iscsi"
 		# shellcheck disable=SC2012
 		LOC[$DISK]="$(ls -l /dev/disk/by-path/*iscsi* | awk -F/ "/$DISK\$/ {print \$5}" | sed -e 's/:.*$//; s/^.*-//')"
@@ -270,7 +323,9 @@ get_smart() {
 	if [[ -n $S1 ]] ; then
 		SN[$DISK]="$S1"
 		SN[$S1]="$DISK"
-		[[ $S1 == $S2 ]] || SN[$S2]="$DISK"
+		if [[ $S1 != $S2 && -n $S2 ]] ; then
+			SN[$S2]="$DISK"
+		fi
 	fi
 	FW[$DISK]="$F"
 	DRIVER[$DISK]="$DRV"
@@ -349,6 +404,7 @@ get_blk_devs() {
 		get_meta "$DISK"
 
 	done <<<"$(lsblk -i | awk '/^[ns|`]/ {print $1" "$4" "$7}' | grep -v ^sr)"
+	progress
 }
 
 ################################################################################
@@ -363,7 +419,7 @@ get_ceph_devs() {
 		DISK="${DISK%[0-9]*}"
 		OSD="${OSD##*/}"
 		debug "get_ceph_devs: DISK:$DISK OSD:$OSD"
-		INARRAY[$DISK]="${OSD/ceph-/osd.}"
+		INARRAY[$DISK]="${OSD/ceph-/osd-}"
 		META[$DISK]=ceph
 		STATE[$DISK]="$(ceph status | awk '/health:/ {print $2}')"
 	done <<<"$(lsblk --ascii | awk '/ceph\// {print $1" "$7}')"
@@ -378,7 +434,6 @@ get_sas_devs() {
 	for CTRL in $(sas2ircu list | awk 'NR>8 && /^ *[0-9]+/ {print $1}') ; do
 		while read -r E S T M K F N1 N2 ST ; do
 			#DISK="${SN[$N1]:-${SN[$N2]}}"
-			#echo "${!SN[@]}" >&2
 			debug "get_sas_devs: ENC:$E SLOT:$S TYPE:$T MFG:$M MODEL:$K FW:$F SN1:$N1 SN2:$N2 ST:$ST"
 			DISK="${SN[$N1]:-${SN[$N2]}}"
 			CES="$CTRL:$E:$S"
@@ -471,6 +526,7 @@ get_lsi_devs() {
 		' <<<"$(storcli64 /call/eall/sall show all nolog)")"
 	rm -f storcli.log storelibdebugit.txt storelibdebugit.txt.1
 	popd >/dev/null
+	progress
 }
 
 ################################################################################
@@ -484,7 +540,7 @@ get_lvm_devs(){
 			DISK="$(sed -E 's|^/dev/||; s|[0-9]+$||' <<<"$DISK")"
 			debug "get_lvm_devs: $DISK in $ARRAY"
 			META[$DISK]="lvm"
-			INARRAY[$DISK]="$(lvs -o vg_name,lv_name | awk 'NR>1 {print $1"/"$2}' | grep -m1 "$ARRAY/")"
+			INARRAY[$DISK]="$(lvs -o vg_name,lv_name | awk 'NR>1 {print $1"-"$2}' | grep -m1 "$ARRAY-")"
 			STATE[$DISK]="Online"
 		fi
 	done <<<"$(pvs -o pv_name,vg_name 2>/dev/null | tail -n +2)"
@@ -568,7 +624,7 @@ get_zpool_devs() {
 disk2type() {
 	local DISK=$1
 	if [[ -z $DISK ]] ; then
-		echo "disk2type: Empty disk"
+		error "disk2type: Empty disk"
 		return 1
 	fi
 	echo "${TYPE[$DISK]:-Empty}"
@@ -596,7 +652,7 @@ disk2array() {
 	elif [[ -n ${INARRAY[${DISK:-0}]:-} ]] ; then
 		echo "${INARRAY[$DISK]}"
 	else
-		echo noarray
+		echo "noarray"
 	fi
 }
 
@@ -639,6 +695,66 @@ obfuscate() {
 }
 
 ################################################################################
+# Deterine if drive is okay
+is_okay() {
+	local DISK=$1 FAIL=0
+
+	if [[ $DISK == $BADDRIVE ]] ; then
+		warn "Marking $DISK as bad" >&2
+		return 1
+	fi
+
+	shopt -s nocasematch
+	case "${STATE[$DISK]:-ONLINE}" in
+		active*|HEALTH_OK|ONLINE|Onln|Ready*|-) >/dev/null;;
+		*) warn "$DISK failed state (${STATE[$DISK]:-})"; FAIL=1;;
+	esac
+
+	case "${HEALTH[$DISK]:-OK}" in
+		OK|PASSED|0|-) >/dev/null;;
+		*) warn "$DISK failed health (${HEALTH[$DISK]:-})"; FAIL=1;;
+	esac
+	shopt -u nocasematch
+
+	debug "is_okay: DISK=$DISK STATE=${STATE[$DISK]:-} HEALTH=${HEALTH[$DISK]:-} FAIL=$FAIL"
+	return $FAIL
+}
+
+################################################################################
+# Assign colors to array names
+get_colors() {
+	#local FGCOLORS=("$BLACK_FG" "$RED_FG" "$GREEN_FG" "$YELLOW_FG" "$BLUE_FG" "$MAGENTA_FG" "$CYAN_FG")
+	local BGCOLORS=("$GREEN_BG$BLACK_FG" "$YELLOW_BG$BLACK_FG" "$BLUE_BG" "$MAGENTA_BG$BLACK_FG" "$CYAN_BG$BLACK_FG" "$WHITE_BG$BLACK_FG" "$RED_BG")
+
+	ARRAYCOLOR["noarray"]=""
+	local ARRAY NUM=0
+	for ARRAY in $(uniq-list "${INARRAY[@]}") ; do
+		if [[ -n ${ARRAYCOLOR[${ARRAY%-*}]:-} ]] ; then
+			ARRAYCOLOR[$ARRAY]="${ARRAYCOLOR[${ARRAY%-*}]}"
+		else
+			ARRAYCOLOR[$ARRAY]="${BGCOLORS[$NUM]}"
+			ARRAYCOLOR[${ARRAY%-*}]="${BGCOLORS[$NUM]}"
+			NUM=$((NUM+1))
+		fi
+		#echo -e "get_colors: ${ARRAYCOLOR[$ARRAY]}$ARRAY$BACK" 2>&1
+	done
+}
+
+################################################################################
+# Optional color for drives
+disk_color() {
+	local DISK=$1 ARRAY CLR
+
+	ARRAY="$(disk2array "$DISK")"
+	debug "disk_color: DISK=$DISK ARRAY=$ARRAY COLOR=${ARRAYCOLOR[$ARRAY]:-}"
+	CLR="${ARRAYCOLOR[$ARRAY]:-}"
+	if ! is_okay "$DISK" ; then
+		CLR+="$STANDOUT"
+	fi
+	echo "$CLR"
+}
+
+################################################################################
 # List and sort all of the discovered drives
 listdrives() {
 	local SHOWDID=""
@@ -647,12 +763,13 @@ listdrives() {
 	[[ ${#DID[@]} -eq 0 ]] || SHOWDID="y"
 
 	info "listdrives"
-	([[ -n $QUIET ]] || echo "Disk: Size: Type: Boot: Kind: Array: Loc: Mfg: Model: FW: Serial: By-id: State: Health: Defects: Wear: ${SHOWDID:+DID:}"
-	local DISK LEN
+	( [[ -n $QUIET ]] || echo "Disk: Size: Type: Boot: Kind: Array: Loc: Mfg: Model: FW: Serial: By-id: State: Health: Defects: Wear: ${SHOWDID:+DID:}"
+	local DISK CLR= LEN
 	for DISK in "${!TYPE[@]}" ; do
 		LEN="0${#DISK}"
-		echo "${LEN:0:2} $DISK ${DISKSIZE[$DISK]} $(disk2type "$DISK") ${BOOT[$DISK]:--} $(disk2meta "$DISK") $(disk2array "$DISK") ${LOC[$DISK]:-$UNUSED} ${MFG[$DISK]:--} ${MODEL[$DISK]:--} ${FW[$DISK]:--} ${SN[$DISK]:--} ${ID[$DISK]:--} $(getstate "$DISK") ${HEALTH[$DISK]:--} ${DEFECTS[$DISK]:--} ${WEAR[$DISK]:--} ${SHOWDID:+${DID[$DISK]:--}}"
-	done | sort | sed -E 's/^[0-9]{2}//' ) | obfuscate | column -t
+		CLR="$(disk_color "$DISK")"
+		echo -e "${LEN:0:2}$DISK $CLR$DISK ${DISKSIZE[$DISK]} $(disk2type "$DISK") ${BOOT[$DISK]:--} $(disk2meta "$DISK") $(disk2array "$DISK") ${LOC[$DISK]:-$UNUSED} ${MFG[$DISK]:--} ${MODEL[$DISK]:--} ${FW[$DISK]:--} ${SN[$DISK]:--} ${ID[$DISK]:--} $(getstate "$DISK") ${HEALTH[$DISK]:--} ${DEFECTS[$DISK]:--} ${WEAR[$DISK]:--} ${SHOWDID:+${DID[$DISK]:--}}$BACK"
+	done | sort | cut -d' ' -f2- ) | obfuscate | column -t
 }
 
 ################################################################################
@@ -664,21 +781,22 @@ show_bays() {
 	fi
 
 	info "show_bays"
-	local ENC ROW B DEV
+	local ENC ROW B DISK CLR
 	for ENC in $(uniq-list "${!ENCLOSURE[@]}") ; do
-		echo "Enclosure: $ENC"
+		echo -e "Enclosure: $ENC"
 		while read -r ROW ; do
 			#echo "$ENC -> $ROW"
 			for B in $ROW ; do
 				if [[ $B =~ [A-Z] ]] ; then
-					echo -n "$B:NA "
+					echo -e -n "$BLUE_FG$B:NA$BACK "
 				else
 					#echo "B:" $ENC:$B ${BAY[$ENC:$B]}"
-					DEV="${BAY[$ENC:$B]:-}"
-					if [[ -n $DEV ]] ; then
-						echo -n "$B:$DEV:$(disk2type "$DEV"):${DISKSIZE[$DEV]} "
+					DISK="${BAY[$ENC:$B]:-}"
+					if [[ -n $DISK ]] ; then
+						CLR="$(disk_color "$DISK")"
+						echo -e -n "$CLR$B:$DISK:$(disk2type "$DISK"):${DISKSIZE[$DISK]}$BACK "
 					else
-						echo -n "$B:Empty "
+						echo -e -n "$YELLOW_FG$B:Empty$BACK "
 					fi
 				fi
 			done
@@ -750,16 +868,10 @@ get_lvm_devs
 get_mdadm_devs
 get_ceph_devs
 get_zpool_devs
-
-################################################################################
-# Read local configuration file
-CONF="/etc/lsdisk.conf"
-if [[ -f $CONF ]] ; then
-	# shellcheck disable=SC1090
-	. "$CONF"
-else
-	warn "No $CONF found."
-fi
+get_colors
+[[ -z $BADDRIVE ]] || warn "Setting $BADDRIVE as bad for testing" >&2
+#echo "${!ARRAYCOLOR[@]}" >&2
+#echo "${!INARRAY[@]}" >&2
 
 ################################################################################
 if [[ $ARG == locate ]] ; then
@@ -772,5 +884,5 @@ else
 			listdrives
 		fi
 		show_bays
-	) | ${PAGER:-less -S}
+	) | ${PAGER:-less -RS}
 fi
