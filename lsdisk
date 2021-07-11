@@ -122,6 +122,7 @@ progress() {
 # Read local configuration file
 CONF="/etc/lsdisk.conf"
 YELLOW_FG=
+BACK=
 if [[ -f $CONF ]] ; then
 	# shellcheck disable=SC1090
 	. "$CONF"
