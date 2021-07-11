@@ -34,7 +34,7 @@
 #  ENCLOSURE[USB]=\
 #  " 0  1"
 
-VERSION=3.1.1
+VERSION=3.1.2
 
 set -e
 set -u
@@ -89,19 +89,19 @@ info() {
 
 ################################################################################
 warn() {
-	echo -e "${YELLOW_FG}W:" "$@" "$BACK"
+	echo -e "${YELLOW_FG}W: $* $BACK"
 }
 
 ################################################################################
 error() {
-	echo -e "${RED_FG}E:" "$@" "$BACK" >&2
+	echo -e "${RED_FG}E: $* $BACK" >&2
 	exit 1
 }
 
 ################################################################################
 debug() {
 	if [[ -n $DEBUG ]] ; then
-		echo -e "${CYAN_FG}D:" "$@" "$BACK" >&2
+		echo -e "${CYAN_FG}D: $*$BACK" >&2
 	fi
 }
 
@@ -109,11 +109,11 @@ debug() {
 progress() {
 	if [[ -n $PROGRESS ]] ; then
 		if [[ -n $DEBUG ]] ; then
-			echo -e "$BLUE_FG""$@""$BACK" >&2
+			echo -e "$BLUE_FG$*$BACK" >&2
 		elif [[ $# -eq 0 ]] ; then
 			echo >&2
 		else
-			echo -e -n "$BLUE_FG""$@"" $BACK" >&2
+			echo -e -n "$BLUE_FG$*$BACK" >&2
 		fi
 	fi
 }
@@ -121,6 +121,7 @@ progress() {
 ################################################################################
 # Read local configuration file
 CONF="/etc/lsdisk.conf"
+YELLOW_FG=
 if [[ -f $CONF ]] ; then
 	# shellcheck disable=SC1090
 	. "$CONF"
@@ -157,11 +158,11 @@ fi
 if [[ -n $COLOR ]] ; then
 	BLACK_FG='\e[30m'; RED_FG='\e[31m'; GREEN_FG='\e[32m'; YELLOW_FG='\e[33m'; BLUE_FG='\e[34m'; MAGENTA_FG='\e[35m'; CYAN_FG='\e[36m'
 	RED_BG='\e[41m'; GREEN_BG='\e[42m'; YELLOW_BG='\e[43m'; BLUE_BG='\e[44m'; MAGENTA_BG='\e[45m'; CYAN_BG='\e[46m'; WHITE_BG='\e[47m'
-	STANDOUT='\e[3m'; BLINK='\e[5m'; BACK='\e[0m'
+	STANDOUT='\e[3m'; BACK='\e[0m'
 else
 	BLACK_FG=; RED_FG=; GREEN_FG=; YELLOW_FG=; BLUE_FG=; MAGENTA_FG=; CYAN_FG=
 	RED_BG=; GREEN_BG=; YELLOW_BG=; BLUE_BG=; MAGENTA_BG=; CYAN_BG=; WHITE_BG=
-	STANDOUT=; BLINK=; BACK=
+	STANDOUT=; BACK=
 fi
 
 ################################################################################
@@ -260,10 +261,10 @@ readsmart() {
 		if [[ $EXIT -eq 0 || $EXIT -eq 4 ]] ; then
 			debug "Disk $DISK(${DRV:-default}): $EXIT\\n$OUTPUT\\n-------------------" >&2
 			if [[ $EXIT -eq 0 ]] ; then
-				echo -e "Driver: ${DRV:-default}\n$OUTPUT" | tee "$CACHE"
+				echo -e "Driver: ${DRV:-default}\\n$OUTPUT" | tee "$CACHE"
 			else
 				rm -f "$CACHE"
-				echo -e "Driver: ${DRV:-default}\n$OUTPUT"
+				echo -e "Driver: ${DRV:-default}\\n$OUTPUT"
 			fi
 			return "$EXIT"
 		fi
@@ -323,7 +324,7 @@ get_smart() {
 	if [[ -n $S1 ]] ; then
 		SN[$DISK]="$S1"
 		SN[$S1]="$DISK"
-		if [[ $S1 != $S2 && -n $S2 ]] ; then
+		if [[ $S1 != "$S2" && -n $S2 ]] ; then
 			SN[$S2]="$DISK"
 		fi
 	fi
@@ -699,19 +700,21 @@ obfuscate() {
 is_okay() {
 	local DISK=$1 FAIL=0
 
-	if [[ $DISK == $BADDRIVE ]] ; then
+	if [[ $DISK == "$BADDRIVE" ]] ; then
 		warn "Marking $DISK as bad" >&2
 		return 1
 	fi
 
 	shopt -s nocasematch
+	# shellcheck disable=SC2188
 	case "${STATE[$DISK]:-ONLINE}" in
 		active*|HEALTH_OK|ONLINE|Onln|Ready*|-) >/dev/null;;
 		*) warn "$DISK failed state (${STATE[$DISK]:-})"; FAIL=1;;
 	esac
 
+	# shellcheck disable=SC2188
 	case "${HEALTH[$DISK]:-OK}" in
-		OK|PASSED|0|-) >/dev/null;;
+		OK|PASSED|0|-) >/dev/null ;;
 		*) warn "$DISK failed health (${HEALTH[$DISK]:-})"; FAIL=1;;
 	esac
 	shopt -u nocasematch
@@ -759,12 +762,12 @@ disk_color() {
 listdrives() {
 	local SHOWDID=""
 	DID[hack]=1
-	unset DID[hack]
+	unset "DID[hack]"
 	[[ ${#DID[@]} -eq 0 ]] || SHOWDID="y"
 
 	info "listdrives"
 	( [[ -n $QUIET ]] || echo "Disk: Size: Type: Boot: Kind: Array: Loc: Mfg: Model: FW: Serial: By-id: State: Health: Defects: Wear: ${SHOWDID:+DID:}"
-	local DISK CLR= LEN
+	local DISK LEN CLR=
 	for DISK in "${!TYPE[@]}" ; do
 		LEN="0${#DISK}"
 		CLR="$(disk_color "$DISK")"
